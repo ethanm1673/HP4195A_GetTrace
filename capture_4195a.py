@@ -1,11 +1,36 @@
-"""HP 4195A minimal trace capture."""
+"""
+HP 4195A trace capture — read-only.
 
-import pyvisa, time, datetime, sys
+Does NOT change sweep state, measurement setup, or calibration.
+Only reads the currently-displayed X/A/B registers in whatever format
+the instrument is already set to.
+"""
+
+import pyvisa, time, datetime, sys, re
 
 GPIB_ADDR = 5
 TIMEOUT_MS = 60000
 
+def sanitize(name):
+    name = name.strip()
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name)
+    name = re.sub(r'\s+', '_', name)
+    return name
+
 def main():
+    # --- prompt for filename and optional note ---
+    raw_name = input('Filename (without extension, blank = timestamp): ')
+    note = input('Short note (optional, saved in CSV header): ')
+
+    if raw_name.strip():
+        base = sanitize(raw_name)
+    else:
+        base = '4195a_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    csv_path = f'{base}.csv'
+    raw_path = f'{base}_raw.txt'
+
+    # --- connect ---
     rm = pyvisa.ResourceManager()
     inst = rm.open_resource(f'GPIB0::{GPIB_ADDR}::INSTR')
     inst.timeout = TIMEOUT_MS
@@ -13,13 +38,15 @@ def main():
     inst.write_termination = '\n'
     inst.chunk_size = 102400
 
-    print('ID:', inst.query('ID?').strip())
+    # --- sanity check only; no state changes ---
+    print('\nID:', inst.query('ID?').strip())
 
-    inst.write('SWM2')
-    time.sleep(0.1)
+    # Set ASCII output format. This affects the GPIB output buffer format
+    # only, NOT calibration, sweep state, or any measurement setup.
     inst.write('FMT1')
     time.sleep(0.2)
 
+    # --- pure register reads ---
     print('Pulling X...')
     x_raw = inst.query('X?')
     print(f'  {len(x_raw)} chars')
@@ -46,19 +73,26 @@ def main():
     b = parse(b_raw)
     print(f'Parsed: X={len(x)}  A={len(a)}  B={len(b)}')
 
-    stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    path = f'4195a_{stamp}.csv'
     n = min(len(x), len(a), len(b))
-    with open(path, 'w') as f:
+    timestamp = datetime.datetime.now().isoformat()
+
+    with open(csv_path, 'w') as f:
+        f.write(f'# HP 4195A capture {timestamp}\n')
+        if note.strip():
+            f.write(f'# note: {note.strip()}\n')
+        f.write(f'# points: {n}\n')
         f.write('x,a,b\n')
         for i in range(n):
             f.write(f'{x[i]:.9e},{a[i]:.9e},{b[i]:.9e}\n')
 
-    # also dump raw for debugging
-    with open(f'4195a_{stamp}_raw.txt', 'w') as f:
+    with open(raw_path, 'w') as f:
+        f.write(f'# HP 4195A raw capture {timestamp}\n')
+        if note.strip():
+            f.write(f'# note: {note.strip()}\n')
         f.write('=== X? ===\n' + x_raw + '\n\n=== A? ===\n' + a_raw + '\n\n=== B? ===\n' + b_raw + '\n')
 
-    print(f'Wrote {path} ({n} points)')
+    print(f'\nWrote {csv_path} ({n} points)')
+    print(f'Wrote {raw_path}')
     inst.close()
 
 if __name__ == '__main__':
